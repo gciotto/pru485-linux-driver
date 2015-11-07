@@ -78,6 +78,11 @@ struct uio_pruss_dev {
 	struct gen_pool *sram_pool;
 };
 
+
+/* Saves platform_device to be used by the character device */
+static struct platform_device* char_pdev;
+static int pdev_count;
+
 static ssize_t store_sync_ddr(struct device *dev, struct device_attribute *attr,  char *buf, size_t count) {
 	struct uio_pruss_dev *gdev;
 	gdev = dev_get_drvdata(dev);
@@ -164,6 +169,10 @@ static int pruss_probe(struct platform_device *dev)
 	int count;
 	struct device_node *child;
 	const char *pin_name;
+
+	/* Saves platform_device which was detected by the system */
+	char_pdev = dev;
+	pdev_count++;
 
 	gdev = kzalloc(sizeof(struct uio_pruss_dev), GFP_KERNEL);
 	if (!gdev)
@@ -359,11 +368,161 @@ static struct platform_driver pruss_driver = {
 		   .of_match_table = pruss_dt_ids,
 		   },
 };
+/* Ending of standard uio_pruss driver */
 
-module_platform_driver(pruss_driver);
+/* Beginning of character device implementation and variables declaration */
+
+#include <linux/mutex.h>
+#include <asm/uaccess.h>
+
+#define  DEVICE_NAME "pruss485"
+#define  CLASS_NAME  "pruss485"
+
+#define PRU_NUM 1
+#define PRU_EVTOUT_1 1
+
+static int majorNumber;
+static char message[256] = {0};
+static short size_of_message;
+
+/* mutex protecting read and writing order */
+static DEFINE_MUTEX(pruchar_mutex);
+
+static struct class* prucharClass  = NULL;
+static struct device* prucharDevice = NULL;
+
+/* struct file_operations function prototypes */
+static int     dev_open(struct inode *, struct file *);
+static int     dev_release(struct inode *, struct file *);
+static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
+static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
+
+/* file operations for file /dev/pru485 */
+static struct file_operations fops = {
+		.open = dev_open,
+		.read = dev_read,
+		.write = dev_write,
+		.release = dev_release,
+};
+
+/* Character device initialization and exit functions   */
+
+static int __init pru_driver_init(void) {
+
+	printk(KERN_INFO "PRU KVM: initializing module.\n");
+
+	/* Registering pruss_driver */
+	platform_driver_register(&pruss_driver);
+	pdev_count = 0;
+
+	mutex_init(&pruchar_mutex);
+
+	majorNumber = register_chrdev(0, DEVICE_NAME, &fops);
+	if (majorNumber < 0) {
+
+		printk(KERN_ALERT "PRU KVM: failed to register a major number.\n");
+		return majorNumber;
+	}
+	printk(KERN_INFO "PRU KVM: registered correctly with major number %d\n", majorNumber);
+
+	prucharClass = class_create(THIS_MODULE, CLASS_NAME);
+	if (IS_ERR(prucharClass)) {
+
+		unregister_chrdev(majorNumber, DEVICE_NAME);
+		printk(KERN_ALERT "PRU KVM: failed to register device class.\n");
+		return PTR_ERR(prucharClass);
+	}
+	printk(KERN_INFO "PRU KVM: device class registered correctly\n");
+
+	prucharDevice = device_create(prucharClass, NULL, MKDEV(majorNumber, 0), NULL, DEVICE_NAME);
+	if (IS_ERR(prucharDevice)){
+
+		mutex_destroy(&pruchar_mutex);
+		class_destroy(prucharClass);
+		unregister_chrdev(majorNumber, DEVICE_NAME);
+		printk(KERN_ALERT "PRU KVM: Failed to create the device\n");
+		return PTR_ERR(prucharDevice);
+	}
+
+	printk(KERN_INFO "PRU KVM: device class created correctly\n");
+
+	return 0;
+}
+
+static void __exit pru_driver_exit(void) {
+
+	platform_driver_unregister(&pruss_driver);
+
+	mutex_destroy(&pruchar_mutex);
+
+	device_destroy(prucharClass, MKDEV(majorNumber, 0));
+	class_unregister(prucharClass);
+	class_destroy(prucharClass);
+	unregister_chrdev(majorNumber, DEVICE_NAME);
+	printk(KERN_INFO "PRU KVM: module closed.\n");
+}
+
+static int dev_open(struct inode *inodep, struct file *filep){
+
+	if(!mutex_trylock(&pruchar_mutex)){    /* Try to acquire the mutex */
+		/* returns 1 if successful and 0 if there is contention */
+		printk(KERN_ALERT "PRU KVM: Device in use by another process");
+		return -EBUSY;
+	}
+
+	printk(KERN_INFO "PRU KVM: device has been opened.\n");
+	return 0;
+}
+
+static int dev_release(struct inode *inodep, struct file *filep){
+
+	mutex_unlock(&pruchar_mutex);
+
+	printk(KERN_INFO "PRU KVM: device successfully closed.\n");
+	return 0;
+}
+
+/* read current memory of PRU485  */
+static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset){
+
+	struct uio_pruss_dev *gdev;
+
+	int error_count = 0;
+
+	if (pdev_count) {
+
+		gdev = platform_get_drvdata (char_pdev);
+
+		dma_addr_t sram = gdev->sram_paddr;
+
+		/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
+		error_count = copy_to_user(buffer, message, size_of_message);
+		if (!error_count) {
+			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", size_of_message);
+			return (size_of_message=0);
+		}
+		else {
+			printk(KERN_INFO "PRU KVM: Failed to send %d characters to the user\n", error_count);
+			return -EFAULT;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
+
+	sprintf(message, "%s(%zu letters)", buffer, len);
+	size_of_message = strlen(message);
+	printk(KERN_INFO "EBBChar: Received %zu characters from the user\n", len);
+	return len;
+}
+
+
+module_init(pru_driver_init);
+module_exit(pru_driver_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
 MODULE_AUTHOR("Amit Chatterjee <amit.chatterjee@ti.com>");
 MODULE_AUTHOR("Pratheesh Gangadhar <pratheesh@ti.com>");
-

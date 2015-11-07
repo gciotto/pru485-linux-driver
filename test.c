@@ -12,7 +12,8 @@ int main(){
    int ret, fd;
    char stringToSend[BUFFER_LENGTH];
    printf("Starting device test code example...\n");
-   fd = open("/dev/pru485", O_RDWR);             // Open the device with read/write access
+   fd = open("/dev/pruss485", O_RDWR);             // Open the device with read/write access
+/*
    if (fd < 0){
       perror("Failed to open the device...");
       return errno;
@@ -28,7 +29,7 @@ int main(){
 
    printf("Press ENTER to read back from the device...\n");
    getchar();
-
+*/
    printf("Reading from the device...\n");
    ret = read(fd, receive, BUFFER_LENGTH);        // Read the response from the LKM
    if (ret < 0){

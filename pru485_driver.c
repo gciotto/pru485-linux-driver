@@ -9,7 +9,8 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
-#include <linux/err.h>
+//#include <linux/err.h>
+#include <asm/uaccess.h>
 
 #define  DEVICE_NAME "pru485"
 #define  CLASS_NAME  "pru485"
@@ -53,7 +54,7 @@ static int __init pru_driver_init(void) {
 	printk(KERN_INFO "PRU KVM: registered correctly with major number %d\n", majorNumber);
 
 	prucharClass = class_create(THIS_MODULE, CLASS_NAME);
-	if (IS_ERR(ebbcharClass)) {
+	if (IS_ERR(prucharClass)) {
 
 		unregister_chrdev(majorNumber, DEVICE_NAME);
 		printk(KERN_ALERT "PRU KVM: failed to register device class.\n");
@@ -62,7 +63,7 @@ static int __init pru_driver_init(void) {
 	printk(KERN_INFO "PRU KVM: device class registered correctly\n");
 
 	prucharDevice = device_create(prucharClass, NULL, MKDEV(majorNumber, 0), NULL, DEVICE_NAME);
-	if (IS_ERR(ebbcharDevice)){
+	if (IS_ERR(prucharDevice)){
 
 		class_destroy(prucharClass);
 		unregister_chrdev(majorNumber, DEVICE_NAME);
@@ -113,6 +114,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 }
 
 static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
+
 	sprintf(message, "%s(%zu letters)", buffer, len);
 	size_of_message = strlen(message);
 	printk(KERN_INFO "EBBChar: Received %zu characters from the user\n", len);

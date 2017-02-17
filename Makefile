@@ -1,4 +1,4 @@
-obj-m+=pru485_driver.o
+obj-m+=pru485_driver.o uio_pruss.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build/ M=$(PWD) modules

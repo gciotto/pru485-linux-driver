@@ -57,7 +57,7 @@ MODULE_PARM_DESC(extram_pool_sz, "external ram pool size to allocate");
  * 8	PRU_EVTOUT5
  * 9	PRU_EVTOUT6
  * 10	PRU_EVTOUT7
-*/
+ */
 #define MAX_PRUSS_EVT	8
 
 #define PINTC_HIDISR	0x0038
@@ -80,8 +80,8 @@ struct uio_pruss_dev {
 
 
 /* Saves platform_device to be used by the character device */
-static struct platform_device* char_pdev;
-static int pdev_count;
+static struct platform_device* _pdev;
+static int _pdev_c;
 
 static ssize_t store_sync_ddr(struct device *dev, struct device_attribute *attr,  char *buf, size_t count) {
 	struct uio_pruss_dev *gdev;
@@ -92,8 +92,8 @@ static ssize_t store_sync_ddr(struct device *dev, struct device_attribute *attr,
 static DEVICE_ATTR(sync_ddr, S_IWUSR, NULL, store_sync_ddr);
 
 static const struct attribute *uio_sysfs_attrs[] = {
-	&dev_attr_sync_ddr.attr,
-	NULL
+		&dev_attr_sync_ddr.attr,
+		NULL
 };
 
 static int uio_sysfs_init(struct platform_device *pdev) {
@@ -129,7 +129,7 @@ static irqreturn_t pruss_handler(int irq, struct uio_info *info)
 }
 
 static void pruss_cleanup(struct platform_device *dev,
-			struct uio_pruss_dev *gdev)
+		struct uio_pruss_dev *gdev)
 {
 	int cnt;
 	struct uio_info *p = gdev->info;
@@ -143,13 +143,13 @@ static void pruss_cleanup(struct platform_device *dev,
 	iounmap(gdev->prussio_vaddr);
 	if (gdev->ddr_vaddr) {
 		dma_free_coherent(&dev->dev, extram_pool_sz, gdev->ddr_vaddr,
-			gdev->ddr_paddr);
+				gdev->ddr_paddr);
 	}
 #ifdef CONFIG_ARCH_DAVINCI_DA850
 	if (gdev->sram_vaddr)
 		gen_pool_free(gdev->sram_pool,
-			      gdev->sram_vaddr,
-			      sram_pool_sz);
+				gdev->sram_vaddr,
+				sram_pool_sz);
 #endif
 	kfree(gdev->info);
 	clk_put(gdev->pruss_clk);
@@ -171,8 +171,8 @@ static int pruss_probe(struct platform_device *dev)
 	const char *pin_name;
 
 	/* Saves platform_device which was detected by the system */
-	char_pdev = dev;
-	pdev_count++;
+	_pdev = dev;
+	_pdev_c++;
 
 	gdev = kzalloc(sizeof(struct uio_pruss_dev), GFP_KERNEL);
 	if (!gdev)
@@ -216,7 +216,7 @@ static int pruss_probe(struct platform_device *dev)
 	pinctrl = devm_pinctrl_get_select_default(&dev->dev);
 	if (IS_ERR(pinctrl))
 		dev_warn(&dev->dev,
-			"pins are not configured from the driver\n");
+				"pins are not configured from the driver\n");
 
 	// Run through all children. They have lables for easy reference.
 	for_each_child_of_node(dev->dev.of_node, child) {
@@ -232,14 +232,14 @@ static int pruss_probe(struct platform_device *dev)
 		}
 		if(count != ret){
 			dev_err(&dev->dev, "The number of gpios (%d) does not match"\
-				" the number of pin names (%d)\n", count, ret);
+					" the number of pin names (%d)\n", count, ret);
 			continue;
 		}
 
 		dev_dbg(&dev->dev, "Child has %u gpios\n", count);
 		for(cnt=0; cnt<count; cnt++){
 			ret = of_property_read_string_index(child,
-				"pin-names", cnt, &pin_name);
+					"pin-names", cnt, &pin_name);
 			if (ret != 0)
 				dev_err(&dev->dev, "Error on pin-name #%d\n", cnt);
 			gpio = of_get_gpio_flags(child, cnt, &flags);
@@ -262,19 +262,19 @@ static int pruss_probe(struct platform_device *dev)
 		gdev->sram_pool = pdata->sram_pool;
 #ifdef CONFIG_ARCH_DAVINCI_DA850
 		gdev->sram_vaddr =
-			gen_pool_alloc(gdev->sram_pool, sram_pool_sz);
+				gen_pool_alloc(gdev->sram_pool, sram_pool_sz);
 		if (!gdev->sram_vaddr) {
 			dev_err(&dev->dev, "Could not allocate SRAM pool\n");
 			goto out_free;
 		}
 #endif
 		gdev->sram_paddr =
-			gen_pool_virt_to_phys(gdev->sram_pool,
-					      gdev->sram_vaddr);
+				gen_pool_virt_to_phys(gdev->sram_pool,
+						gdev->sram_vaddr);
 	}
 
 	gdev->ddr_vaddr = dma_alloc_coherent(&dev->dev, extram_pool_sz,
-				&(gdev->ddr_paddr), GFP_KERNEL | GFP_DMA);
+			&(gdev->ddr_paddr), GFP_KERNEL | GFP_DMA);
 	if (!gdev->ddr_vaddr) {
 		dev_err(&dev->dev, "Could not allocate external memory\n");
 		goto out_free;
@@ -289,11 +289,11 @@ static int pruss_probe(struct platform_device *dev)
 
 	if (dev->dev.of_node) {
 		ret = of_property_read_u32(dev->dev.of_node,
-					   "ti,pintc-offset",
-					   &gdev->pintc_base);
+				"ti,pintc-offset",
+				&gdev->pintc_base);
 		if (ret < 0) {
 			dev_err(&dev->dev,
-				"Can't parse ti,pintc-offset property\n");
+					"Can't parse ti,pintc-offset property\n");
 			goto out_free;
 		}
 	} else
@@ -338,7 +338,7 @@ static int pruss_probe(struct platform_device *dev)
 	platform_set_drvdata(dev, gdev);
 	return 0;
 
-out_free:
+	out_free:
 	pruss_cleanup(dev, gdev);
 	return ret;
 }
@@ -353,20 +353,20 @@ static int pruss_remove(struct platform_device *dev)
 }
 
 static const struct of_device_id pruss_dt_ids[] = {
-	{ .compatible = "ti,pruss-v1", .data = NULL, },
-	{ .compatible = "ti,pruss-v2", .data = NULL, },
-	{},
+		{ .compatible = "ti,pruss-v1", .data = NULL, },
+		{ .compatible = "ti,pruss-v2", .data = NULL, },
+		{},
 };
 MODULE_DEVICE_TABLE(of, pruss_dt_ids);
 
 static struct platform_driver pruss_driver = {
-	.probe = pruss_probe,
-	.remove = pruss_remove,
-	.driver = {
-		   .name = DRV_NAME,
-		   .owner = THIS_MODULE,
-		   .of_match_table = pruss_dt_ids,
-		   },
+		.probe = pruss_probe,
+		.remove = pruss_remove,
+		.driver = {
+				.name = DRV_NAME,
+				.owner = THIS_MODULE,
+				.of_match_table = pruss_dt_ids,
+		},
 };
 /* Ending of standard uio_pruss driver */
 
@@ -413,7 +413,7 @@ static int __init pru_driver_init(void) {
 
 	/* Registering pruss_driver */
 	platform_driver_register(&pruss_driver);
-	pdev_count = 0;
+	_pdev_c = 0;
 
 	mutex_init(&pruchar_mutex);
 
@@ -489,16 +489,33 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 
 	int error_count = 0;
 
-	if (pdev_count) {
+	sprintf(message, "oi");
 
-		gdev = platform_get_drvdata (char_pdev);
+	printk (KERN_INFO "_pdev_c=%d\n", _pdev_c);
 
-		dma_addr_t sram = gdev->sram_paddr;
+	if (_pdev) {
+
+		gdev = platform_get_drvdata(_pdev);
+
+		if (gdev) {
+
+			unsigned int *p = gdev->ddr_vaddr;
+
+			for (; p; p++) {
+
+				if (*p)
+					printk (KERN_INFO "%x\n", *p);
+				//sprintf (message + strlen(message), "%x ", d);
+
+
+			}
+		}
+		else printk (KERN_INFO "gdev NULL \n");
 
 		/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
-		error_count = copy_to_user(buffer, message, size_of_message);
+		error_count = copy_to_user(buffer, message, strlen(message));
 		if (!error_count) {
-			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", size_of_message);
+			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", strlen(message));
 			return (size_of_message=0);
 		}
 		else {

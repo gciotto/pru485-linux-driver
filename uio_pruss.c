@@ -298,6 +298,7 @@ static int pruss_probe(struct platform_device *dev)
 		}
 	} else
 		gdev->pintc_base = pdata->pintc_base;
+
 	gdev->hostirq_start = platform_get_irq(dev, 0);
 
 	for (cnt = 0, p = gdev->info; cnt < MAX_PRUSS_EVT; cnt++, p++) {
@@ -378,11 +379,36 @@ static struct platform_driver pruss_driver = {
 #define  DEVICE_NAME "pruss485"
 #define  CLASS_NAME  "pruss485"
 
-#define PRU_NUM 1
+#define PRU_NUM 	 1
 #define PRU_EVTOUT_1 1
 
+#define AM33XX_PRUSS_SHAREDRAM_BASE 0x10000
+
+#define SZ_12K 	0x3000
+#define STEP 	0x1
+
+#define MODE_OFFSET 				25
+#define MODE_BAUD_OFFSET_BRGCONFIG 	0x2
+#define MODE_BAUD_OFFSET_LSB 		0x3
+#define MODE_BAUD_OFFSET_MSB 		0x4
+#define MODE_BAUD_OFFSET_LENGTH		26
+#define MODE_COUNTER_OFFSET			80
+#define SYNC_STEP_OFFSET			50
+
+#define OLD_MESSAGE					0x55
+#define	NEW_RECEIVED_MESSAGE		0x00
+#define	MESSAGE_TO_SEND				0xff
+
+enum ioctl_cmd {
+	PRUSS_CLEAN,
+	PRUSS_MODE,
+	PRUSS_BAUDRATE,
+	PRUSS_SYNC_STEP,
+	PRUSS_SET_COUNTER,
+};
+
 static int majorNumber;
-static char message[256] = {0};
+static u8 message[SZ_12K] = {0};
 static short size_of_message;
 
 /* mutex protecting read and writing order */
@@ -396,6 +422,7 @@ static int     dev_open(struct inode *, struct file *);
 static int     dev_release(struct inode *, struct file *);
 static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
+static long    dev_unlocked_ioctl (struct file *, unsigned int, unsigned long);
 
 /* file operations for file /dev/pru485 */
 static struct file_operations fops = {
@@ -403,9 +430,139 @@ static struct file_operations fops = {
 		.read = dev_read,
 		.write = dev_write,
 		.release = dev_release,
+		.unlocked_ioctl = dev_unlocked_ioctl,
 };
 
 /* Character device initialization and exit functions   */
+
+static int __dev_set_sync_counter (void __iomem *_prussio_vaddr, unsigned long sync_counter) {
+
+	iowrite8(sync_counter & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET);
+	iowrite8((sync_counter >> 8) & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET + 1);
+
+	return 0;
+
+}
+
+static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long baudrate) {
+
+	u8 brgconfig, div_lsb, div_msb;
+	int one_byte_length_ns;
+
+	switch (baudrate) {
+
+	case 6:
+		brgconfig = 0x28;
+		div_lsb = 0x02;
+		div_msb = 0;
+		one_byte_length_ns = 1667; /* 10000/6 */
+		break;
+
+	case 10:
+		brgconfig = 0x28;
+		div_lsb = 0x01;
+		div_msb = 0;
+		one_byte_length_ns = 1000; /* 10000/10 */
+		break;
+
+	case 12:
+		brgconfig = 0x24;
+		div_lsb = 0x01;
+		div_msb = 0;
+		one_byte_length_ns = 833; /* 10000/12 */
+		break;
+
+	case 9600:
+		brgconfig = 0x0a;
+		div_lsb = 0x86;
+		div_msb = 0x01;
+		one_byte_length_ns = 1041666; /* 100000000/96 */
+		break;
+
+	case 14400:
+		brgconfig = 0x07;
+		div_lsb = 0x04;
+		div_msb = 0x01;
+		one_byte_length_ns = 694444; /* 100000000/144 */
+		break;
+
+	case 19200:
+		brgconfig = 0x05;
+		div_lsb = 0xc3;
+		div_msb = 0x00;
+		one_byte_length_ns = 694444; /* 100000000/144 */
+		break;
+
+	case 38400:
+		brgconfig = 0x15;
+		div_lsb = 0xc3;
+		div_msb = 0x00;
+		one_byte_length_ns = 260416; /* 100000000/384 */
+		break;
+
+	case 57600:
+		brgconfig = 0x27;
+		div_lsb = 0x04;
+		div_msb = 0x01;
+		one_byte_length_ns = 173611; /* 100000000/576 */
+		break;
+
+	case 115200:
+		brgconfig = 0x09;
+		div_lsb = 0x20;
+		div_msb = 0x00;
+		one_byte_length_ns = 86805; /* 100000000/1152 */
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	iowrite8(brgconfig, _prussio_vaddr + MODE_BAUD_OFFSET_BRGCONFIG);
+	iowrite8(div_lsb, _prussio_vaddr + MODE_BAUD_OFFSET_LSB);
+	iowrite8(div_msb, _prussio_vaddr + MODE_BAUD_OFFSET_MSB);
+
+	iowrite8(one_byte_length_ns & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH);
+	iowrite8((one_byte_length_ns >> 8) & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH + 1);
+	iowrite8((one_byte_length_ns >> 16) & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH + 2);
+
+	return 0;
+}
+
+static int __dev_clean_sram (void __iomem *_prussio_vaddr) {
+
+	unsigned int count;
+
+	for (count = 0; count < 100; count++)
+		iowrite8(0, _prussio_vaddr + count);
+
+	return 0;
+}
+
+static int __dev_set_sync_stop (void __iomem *_prussio_vaddr) {
+
+	if (ioread8(_prussio_vaddr + MODE_OFFSET) != 'M')
+		return -EINVAL;
+
+	iowrite8(0, _prussio_vaddr + 5);
+
+	return 0;
+
+}
+
+static int __dev_set_sync_step (void __iomem *_prussio_vaddr) {
+
+	iowrite8(0x06, _prussio_vaddr + SYNC_STEP_OFFSET);
+	iowrite8(0xff, _prussio_vaddr + SYNC_STEP_OFFSET + 1);
+	iowrite8(0x50, _prussio_vaddr + SYNC_STEP_OFFSET + 2);
+	iowrite8(0x00, _prussio_vaddr + SYNC_STEP_OFFSET + 3);
+	iowrite8(0x01, _prussio_vaddr + SYNC_STEP_OFFSET + 4);
+	iowrite8(0x0c, _prussio_vaddr + SYNC_STEP_OFFSET + 5);
+	iowrite8(0xa4, _prussio_vaddr + SYNC_STEP_OFFSET + 6);
+
+	return 0;
+
+}
 
 static int __init pru_driver_init(void) {
 
@@ -485,35 +642,28 @@ static int dev_release(struct inode *inodep, struct file *filep){
 /* read current memory of PRU485  */
 static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset){
 
-	struct uio_pruss_dev *gdev;
-
 	int error_count = 0;
-
-	sprintf(message, "oi");
-
-	printk (KERN_INFO "_pdev_c=%d\n", _pdev_c);
 
 	if (_pdev) {
 
-		gdev = platform_get_drvdata(_pdev);
+		struct uio_pruss_dev *gdev = platform_get_drvdata(_pdev);
 
 		if (gdev) {
 
-			unsigned int *p = gdev->ddr_vaddr;
+			struct resource *_regs_prussio = platform_get_resource(_pdev, IORESOURCE_MEM, 0);
+			unsigned int _uio_size = resource_size(_regs_prussio), count;
+			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + AM33XX_PRUSS_SHAREDRAM_BASE;
 
-			for (; p; p++) {
-
-				if (*p)
-					printk (KERN_INFO "%x\n", *p);
-				//sprintf (message + strlen(message), "%x ", d);
-
-
-			}
+			for (count = 0;	count < SZ_12K;	count++)
+				message[count] = ioread8(p + count);
 		}
-		else printk (KERN_INFO "gdev NULL \n");
+		else {
+			printk (KERN_INFO "gdev NULL \n");
+			return -EFAULT;
+		}
 
 		/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
-		error_count = copy_to_user(buffer, message, strlen(message));
+		error_count = copy_to_user(buffer, message, SZ_12K);
 		if (!error_count) {
 			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", strlen(message));
 			return (size_of_message=0);
@@ -527,6 +677,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 	return -EINVAL;
 }
 
+
 static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
 
 	sprintf(message, "%s(%zu letters)", buffer, len);
@@ -535,6 +686,62 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 	return len;
 }
 
+static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned long arg) {
+
+	if (_pdev) {
+
+		struct uio_pruss_dev *gdev = platform_get_drvdata(_pdev);
+
+		if (gdev) {
+
+			struct resource *_regs_prussio = platform_get_resource(_pdev, IORESOURCE_MEM, 0);
+			unsigned int _uio_size = resource_size(_regs_prussio);
+			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + AM33XX_PRUSS_SHAREDRAM_BASE;
+
+			switch (cmd) {
+
+			case PRUSS_MODE:
+
+				if (arg == 'M' || arg == 'S') {
+					iowrite8(arg, p + MODE_OFFSET);
+
+					__dev_set_sync_stop(p);
+
+					if (arg == 'S')
+						iowrite8(OLD_MESSAGE, p + 1);
+
+					return 0;
+				}
+
+				return -EINVAL;
+
+			case PRUSS_BAUDRATE:
+
+				return __dev_config_baudrate(p, arg);
+
+			case PRUSS_SYNC_STEP:
+
+				return __dev_set_sync_step(p);
+
+			case PRUSS_CLEAN:
+
+				return __dev_clean_sram(p);
+
+			case PRUSS_SET_COUNTER:
+
+				return __dev_set_sync_counter(p, arg);
+
+			default:
+
+				return -EINVAL;
+			}
+		}
+		else
+			return -EFAULT;
+	}
+
+	return -EINVAL;
+}
 
 module_init(pru_driver_init);
 module_exit(pru_driver_exit);

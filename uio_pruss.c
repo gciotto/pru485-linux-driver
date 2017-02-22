@@ -79,10 +79,12 @@ struct uio_pruss_dev {
 };
 
 #ifdef PRUSS_CHAR_DEVICE
-/* Saves platform_device to be used by the character device */
+/* Interruption ID */
 #define PRU_EVTOUT 	 3
+/* Saves platform_device to be used by the character device */
 static struct platform_device* _pdev;
 static int _pdev_c;
+/* Completion variable to signal an interruption */
 static DECLARE_COMPLETION(intr_completion);
 #endif
 
@@ -128,6 +130,8 @@ static irqreturn_t pruss_handler(int irq, struct uio_info *info)
 		return IRQ_NONE;
 
 #ifdef PRUSS_CHAR_DEVICE
+	/* If the interruption corresponds to PRU_EVTOUT, we must signal
+	 * other tasks, which might be waiting. */
 	if (intr_bit == PRU_EVTOUT)
 		complete(&intr_completion);
 #endif
@@ -179,9 +183,11 @@ static int pruss_probe(struct platform_device *dev)
 	struct device_node *child;
 	const char *pin_name;
 
+#ifdef PRUSS_CHAR_DEVICE
 	/* Saves platform_device which was detected by the system */
 	_pdev = dev;
 	_pdev_c++;
+#endif
 
 	gdev = kzalloc(sizeof(struct uio_pruss_dev), GFP_KERNEL);
 	if (!gdev)
@@ -396,52 +402,63 @@ static struct platform_driver pruss_driver = {
 #define  DEVICE_NAME "pruss485"
 #define  CLASS_NAME  "pruss485"
 
+/* Offset of memory areas and register offsets.
+ * Refer to table 5 of the AM335x PRU Reference Guide*/
 #define PRUSS_SHAREDRAM_BASE 0x10000
-
 #define PINTC_HIEISR		0x0034
 #define PRU_INTC_SECR1_REG 	0x280
+#define SRAM_SIZE 			0x3000
+
+/* ARM system interruption */
 #define PRU_ARM_INTERRUPT  	20
 
-#define SZ_12K 	0x3000
-#define STEP 	0x1
-
+/* Application specific constants */
 #define OLD_MESSAGE					0x55
 #define	NEW_RECEIVED_MESSAGE		0x00
 #define	MESSAGE_TO_SEND				0xff
 
+/* GPIOs used to get board identification  */
 #define GPIO_P8_31					10
 #define GPIO_P8_32					11
 #define GPIO_P8_33					9
 #define GPIO_P8_34					81
 #define GPIO_P8_35					8
 
+/* IOCTL commands */
 enum ioctl_cmd {
 	PRUSS_CLEAN = 10,
 	PRUSS_MODE,
-	PRUSS_SYNC_STEP,
-	PRUSS_SET_COUNTER,
+	PRUSS_SET_SYNC_STEP,
+	PRUSS_SET_PULSE_COUNT_SYNC,
 	PRUSS_GET_HW_ADDRESS,
 	PRUSS_BAUDRATE,
 	PRUSS_TIMEOUT,
+	PRUSS_GET_PULSE_COUNT_SYNC,
+	PRUSS_CLEAR_PULSE_COUNT_SYNC,
+	PRUSS_START_SYNC,
+	PRUSS_STOP_SYNC,
 };
 
+/* Shared RAM offsets */
 enum offset {
 	STATUS_OFFSET = 1,
 	BAUD_BRGCONFIG_OFFSET,
 	BAUD_LSB_OFFSET,
 	BAUD_MSB_OFFSET,
-	TIMEOUT_OFFSET = 6,
+	SYNC_OFFSET,
+	TIMEOUT_OFFSET,
 	HW_ADDR_OFFSET = 24,
 	MODE_OFFSET,
 	BAUD_LENGTH_OFFSET,
+	INSTR_COUNT_OFFSET = 29,
 	SYNC_STEP_OFFSET = 50,
-	MODE_COUNTER_OFFSET = 80,
+	COUNTER_OFFSET = 80,
 	SHRAM_WRITE_OFFSET = 0x64,
 	SHRAM_READ_OFFSET = 0x1800,
 };
 
 static int majorNumber;
-static u8 message[SZ_12K] = {0};
+static u8 message[SRAM_SIZE] = {0};
 
 /* mutex protecting read and writing order */
 static DEFINE_MUTEX(pruchar_mutex);
@@ -456,6 +473,15 @@ static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static long    dev_unlocked_ioctl (struct file *, unsigned int, unsigned long);
 
+/* application specific function prototypes */
+static int init_gpio (unsigned int id, const char *);
+static u8 dev_get_hw_addr (void);
+static int dev_set_sync_counter (void __iomem *, unsigned long);
+static int dev_clear_count_sync (void __iomem *);
+static int dev_set_sync_stop (void __iomem *);
+static int dev_set_sync_start (u32, void __iomem *);
+static int dev_config_baudrate (void __iomem *, unsigned long);
+
 /* file operations for file /dev/pru485 */
 static struct file_operations fops = {
 		.open = dev_open,
@@ -465,9 +491,9 @@ static struct file_operations fops = {
 		.unlocked_ioctl = dev_unlocked_ioctl,
 };
 
-/* Character device initialization and exit functions   */
+/* Character device functions */
 
-static int __init_gpio (unsigned int id, const char *label) {
+static int init_gpio (unsigned int id, const char *label) {
 
 	int err = 0;
 
@@ -477,15 +503,15 @@ static int __init_gpio (unsigned int id, const char *label) {
 	return err;
 }
 
-static u8 __dev_get_hw_addr(void) {
+static u8 dev_get_hw_addr(void) {
 
 	u8 addr = 0;
 
-	__init_gpio(GPIO_P8_31, "gpio10");
-	__init_gpio(GPIO_P8_32, "gpio11");
-	__init_gpio(GPIO_P8_33, "gpio9");
-	__init_gpio(GPIO_P8_34, "gpio81");
-	__init_gpio(GPIO_P8_35, "gpio8");
+	init_gpio(GPIO_P8_31, "gpio10");
+	init_gpio(GPIO_P8_32, "gpio11");
+	init_gpio(GPIO_P8_33, "gpio9");
+	init_gpio(GPIO_P8_34, "gpio81");
+	init_gpio(GPIO_P8_35, "gpio8");
 
 	if (gpio_get_value(GPIO_P8_31))
 		addr |= 0b0001;
@@ -511,17 +537,46 @@ static u8 __dev_get_hw_addr(void) {
 	return addr;
 }
 
-static int __dev_set_sync_counter (void __iomem *_prussio_vaddr, unsigned long sync_counter) {
+static int dev_set_sync_counter (void __iomem *io_vaddr, unsigned long sync_counter) {
 
-	iowrite16(sync_counter, _prussio_vaddr + MODE_COUNTER_OFFSET);
-	/*
-	iowrite8(sync_counter & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET);
-	iowrite8((sync_counter >> 8) & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET + 1);
-	*/
+	iowrite16(sync_counter, io_vaddr + COUNTER_OFFSET);
+
 	return 0;
 }
 
-static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long baudrate) {
+static int dev_set_sync_start (u32 delay_us, void __iomem *io_vaddr) {
+
+	if (ioread8(io_vaddr + MODE_OFFSET) == 'M') {
+
+		u8 i;
+		u32 delay_ns, n_loops;
+
+		dev_clear_count_sync(io_vaddr);
+
+		delay_ns = delay_us * 1000;
+
+		/* Delay entre comando de sincronismo e requisicao qualquer */
+		/* Calculo do delay */
+
+		for (i = 0; i < 3; i++)
+			delay_ns += (ioread8(io_vaddr + BAUD_LENGTH_OFFSET + i) << (i * 8));
+
+		/* numero de loops = delay / 10 ns */
+		n_loops = delay_ns/10;
+
+		/* armazena numero de instrucoes */
+		for (i = 0; i < 3; i++)
+			iowrite8(n_loops >> (i * 8), io_vaddr + INSTR_COUNT_OFFSET + i);
+
+		iowrite8(0xff, io_vaddr + SYNC_OFFSET);
+
+		return 0;
+	}
+
+	return -1;
+}
+
+static int dev_config_baudrate (void __iomem *io_vaddr, unsigned long baudrate) {
 
 	u8 brgconfig, div_lsb, div_msb;
 	int one_byte_length_ns;
@@ -557,9 +612,6 @@ static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long ba
 		break;
 
 	case 14400:
-
-		printk (KERN_INFO "14400 entrou");
-
 		brgconfig = 0x07;
 		div_lsb = 0x04;
 		div_msb = 0x01;
@@ -598,52 +650,61 @@ static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long ba
 		return -EINVAL;
 	}
 
-	iowrite8(brgconfig, _prussio_vaddr + BAUD_BRGCONFIG_OFFSET);
-	iowrite8(div_lsb, _prussio_vaddr + BAUD_LSB_OFFSET);
-	iowrite8(div_msb, _prussio_vaddr + BAUD_MSB_OFFSET);
+	iowrite8(brgconfig, io_vaddr + BAUD_BRGCONFIG_OFFSET);
+	iowrite8(div_lsb, io_vaddr + BAUD_LSB_OFFSET);
+	iowrite8(div_msb, io_vaddr + BAUD_MSB_OFFSET);
 
-	iowrite8(one_byte_length_ns & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET);
-	iowrite8((one_byte_length_ns >> 8) & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET + 1);
-	iowrite8((one_byte_length_ns >> 16) & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET + 2);
+	iowrite8(one_byte_length_ns & 0xff, io_vaddr + BAUD_LENGTH_OFFSET);
+	iowrite8((one_byte_length_ns >> 8) & 0xff, io_vaddr + BAUD_LENGTH_OFFSET + 1);
+	iowrite8((one_byte_length_ns >> 16) & 0xff, io_vaddr + BAUD_LENGTH_OFFSET + 2);
 
 	return 0;
 }
 
-static int __dev_clean_sram (void __iomem *_prussio_vaddr) {
+static int dev_clear_count_sync (void __iomem *io_vaddr) {
+
+	if (!ioread8(io_vaddr + SYNC_OFFSET)) {
+
+		iowrite16(0, io_vaddr + COUNTER_OFFSET);
+		return 0;
+	}
+
+	/* Error: not possible to clear pulse counting while sync operation is enabled. */
+	return -1;
+}
+
+static int dev_clean_sram (void __iomem *io_vaddr) {
 
 	unsigned int count;
 
-	printk(KERN_INFO "chamou\n");
-
 	for (count = 0; count < 100; count++)
-		iowrite8(0, _prussio_vaddr + count);
+		iowrite8(0, io_vaddr + count);
 
 	return 0;
 }
 
-static int __dev_set_sync_stop (void __iomem *_prussio_vaddr) {
+static int dev_set_sync_stop (void __iomem *io_vaddr) {
 
-	if (ioread8(_prussio_vaddr + MODE_OFFSET) != 'M')
-		return -EINVAL;
+	if (ioread8(io_vaddr + MODE_OFFSET) != 'M')
+		return -1;
 
-	iowrite8(0, _prussio_vaddr + 5);
+	iowrite8(0, io_vaddr + SYNC_OFFSET);
 
 	return 0;
 
 }
 
-static int __dev_set_sync_step (void __iomem *_prussio_vaddr) {
+static int dev_set_sync_step (void __iomem *io_vaddr) {
 
-	iowrite8(0x06, _prussio_vaddr + SYNC_STEP_OFFSET);
-	iowrite8(0xff, _prussio_vaddr + SYNC_STEP_OFFSET + 1);
-	iowrite8(0x50, _prussio_vaddr + SYNC_STEP_OFFSET + 2);
-	iowrite8(0x00, _prussio_vaddr + SYNC_STEP_OFFSET + 3);
-	iowrite8(0x01, _prussio_vaddr + SYNC_STEP_OFFSET + 4);
-	iowrite8(0x0c, _prussio_vaddr + SYNC_STEP_OFFSET + 5);
-	iowrite8(0xa4, _prussio_vaddr + SYNC_STEP_OFFSET + 6);
+	iowrite8(0x06, io_vaddr + SYNC_STEP_OFFSET);
+	iowrite8(0xff, io_vaddr + SYNC_STEP_OFFSET + 1);
+	iowrite8(0x50, io_vaddr + SYNC_STEP_OFFSET + 2);
+	iowrite8(0x00, io_vaddr + SYNC_STEP_OFFSET + 3);
+	iowrite8(0x01, io_vaddr + SYNC_STEP_OFFSET + 4);
+	iowrite8(0x0c, io_vaddr + SYNC_STEP_OFFSET + 5);
+	iowrite8(0xa4, io_vaddr + SYNC_STEP_OFFSET + 6);
 
 	return 0;
-
 }
 
 static int __init pru_driver_init(void) {
@@ -739,12 +800,12 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + PRUSS_SHAREDRAM_BASE;
 
 
-			for (count = 0;	count < SZ_12K;	count++) {
+			/*
+			for (count = 0;	count < SRAM_SIZE;	count++) {
 				message[count] = ioread8(p + count);
 				if (count < 100) printk (KERN_INFO "[%d] = 0x%u\n", count, message[count]);
-			}
+			}*/
 
-			/*
 			u8 mode = ioread8(p + MODE_OFFSET), status;
 
 			switch (mode) {
@@ -762,6 +823,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 				break;
 
 			case 'S':
+
 				status = ioread8(p + STATUS_OFFSET);
 				if (status  == NEW_RECEIVED_MESSAGE){
 
@@ -781,7 +843,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 
 			default:
 				return -EINVAL;
-			}*/
+			}
 
 			/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
 			if (copy_to_user(buffer, message, count)){
@@ -816,13 +878,12 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 				//iowrite32(,p + TIMEOUT_OFFSET); TO-DO
 			}
 
-			/*
+			/* SHRAM_WRITE_OFFSET is not 4-byte aligned, so we need to write
+			 * each byte at a time */
 			iowrite8(len & 0xff, p + SHRAM_WRITE_OFFSET);
 			iowrite8((len >> 8) & 0xff, p + SHRAM_WRITE_OFFSET + 1);
 			iowrite8((len >> 16) & 0xff, p + SHRAM_WRITE_OFFSET + 2);
 			iowrite8((len >> 24) & 0xff, p + SHRAM_WRITE_OFFSET + 3);
-			*/
-			iowrite32(len, p + SHRAM_WRITE_OFFSET);
 
 			for (count = 0; count < len; count++)
 				iowrite8(buffer[count], p + SHRAM_WRITE_OFFSET + 4 + count);
@@ -848,7 +909,6 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 			printk (KERN_INFO "gdev NULL \n");
 			return -EFAULT;
 		}
-
 	}
 
 	return -EINVAL;
@@ -874,7 +934,7 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 				if (arg == 'M' || arg == 'S') {
 					iowrite8(arg, p + MODE_OFFSET);
 
-					__dev_set_sync_stop(p);
+					dev_set_sync_stop(p);
 
 					if (arg == 'S')
 						iowrite8(OLD_MESSAGE, p + STATUS_OFFSET);
@@ -885,23 +945,15 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 
 			case PRUSS_BAUDRATE:
 
-				return __dev_config_baudrate(p, arg);
-
-			case PRUSS_SYNC_STEP:
-
-				return __dev_set_sync_step(p);
+				return dev_config_baudrate(p, arg);
 
 			case PRUSS_CLEAN:
 
-				return __dev_clean_sram(p);
-
-			case PRUSS_SET_COUNTER:
-
-				return __dev_set_sync_counter(p, arg);
+				return dev_clean_sram(p);
 
 			case PRUSS_GET_HW_ADDRESS:
 
-				hw_addr = __dev_get_hw_addr();
+				hw_addr = dev_get_hw_addr();
 				iowrite8(hw_addr, p + HW_ADDR_OFFSET);
 
 				return 0;
@@ -917,9 +969,29 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 
 				return 0;
 
-			default:
+			case PRUSS_SET_SYNC_STEP:
 
-				return -EINVAL;
+				return dev_set_sync_step(p);
+
+			case PRUSS_SET_PULSE_COUNT_SYNC:
+
+				return dev_set_sync_counter(p, arg);
+
+			case PRUSS_GET_PULSE_COUNT_SYNC:
+
+				return ioread16(p + COUNTER_OFFSET);
+
+			case PRUSS_CLEAR_PULSE_COUNT_SYNC:
+
+				return dev_clear_count_sync(p);
+
+			case PRUSS_START_SYNC:
+
+				return dev_set_sync_start(arg, p);
+
+			case PRUSS_STOP_SYNC:
+
+				return dev_set_sync_stop(p);
 			}
 		}
 		else return -EFAULT;

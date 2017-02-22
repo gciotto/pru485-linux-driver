@@ -389,6 +389,7 @@ static struct platform_driver pruss_driver = {
 /* Ending of standard uio_pruss driver */
 
 /* Beginning of character device implementation and variables declaration */
+#ifdef PRUSS_CHAR_DEVICE
 
 #include <linux/mutex.h>
 #include <asm/uaccess.h>
@@ -405,26 +406,26 @@ static struct platform_driver pruss_driver = {
 /* Offset of memory areas and register offsets.
  * Refer to table 5 of the AM335x PRU Reference Guide*/
 #define PRUSS_SHAREDRAM_BASE 0x10000
-#define PINTC_HIEISR		0x0034
-#define PRU_INTC_SECR1_REG 	0x280
-#define SRAM_SIZE 			0x3000
+#define PINTC_HIEISR 0x0034
+#define PRU_INTC_SECR1_REG 0x280
+#define SRAM_SIZE 0x3000
 
 /* ARM system interruption */
-#define PRU_ARM_INTERRUPT  	20
+#define PRU_ARM_INTERRUPT 20
 
 /* Application specific constants */
-#define OLD_MESSAGE					0x55
-#define	NEW_RECEIVED_MESSAGE		0x00
-#define	MESSAGE_TO_SEND				0xff
+#define OLD_MESSAGE 0x55
+#define	NEW_RECEIVED_MESSAGE 0x00
+#define	MESSAGE_TO_SEND 0xff
 
 /* GPIOs used to get board identification  */
-#define GPIO_P8_31					10
-#define GPIO_P8_32					11
-#define GPIO_P8_33					9
-#define GPIO_P8_34					81
-#define GPIO_P8_35					8
+#define GPIO_P8_31 10
+#define GPIO_P8_32 11
+#define GPIO_P8_33 9
+#define GPIO_P8_34 81
+#define GPIO_P8_35 8
 
-/* IOCTL commands */
+/* ioctl() available commands */
 enum ioctl_cmd {
 	PRUSS_CLEAN = 10,
 	PRUSS_MODE,
@@ -439,7 +440,7 @@ enum ioctl_cmd {
 	PRUSS_STOP_SYNC,
 };
 
-/* Shared RAM offsets */
+/* Shared RAM memory offsets */
 enum offset {
 	STATUS_OFFSET = 1,
 	BAUD_BRGCONFIG_OFFSET,
@@ -493,6 +494,7 @@ static struct file_operations fops = {
 
 /* Character device functions */
 
+/* Initialization procedure a GPIO pin */
 static int init_gpio (unsigned int id, const char *label) {
 
 	int err = 0;
@@ -503,10 +505,12 @@ static int init_gpio (unsigned int id, const char *label) {
 	return err;
 }
 
+/* Reads hardware address from GPIO pins */
 static u8 dev_get_hw_addr(void) {
 
 	u8 addr = 0;
 
+	/* Initializes all GPIO ports */
 	init_gpio(GPIO_P8_31, "gpio10");
 	init_gpio(GPIO_P8_32, "gpio11");
 	init_gpio(GPIO_P8_33, "gpio9");
@@ -537,6 +541,7 @@ static u8 dev_get_hw_addr(void) {
 	return addr;
 }
 
+/* Updates the synchronization counter with sync_counter parameter */
 static int dev_set_sync_counter (void __iomem *io_vaddr, unsigned long sync_counter) {
 
 	iowrite16(sync_counter, io_vaddr + COUNTER_OFFSET);
@@ -544,6 +549,7 @@ static int dev_set_sync_counter (void __iomem *io_vaddr, unsigned long sync_coun
 	return 0;
 }
 
+/* Bunch of commands needed to start sync operation */
 static int dev_set_sync_start (u32 delay_us, void __iomem *io_vaddr) {
 
 	if (ioread8(io_vaddr + MODE_OFFSET) == 'M') {
@@ -576,6 +582,7 @@ static int dev_set_sync_start (u32 delay_us, void __iomem *io_vaddr) {
 	return -1;
 }
 
+/* Configures serial baudrate */
 static int dev_config_baudrate (void __iomem *io_vaddr, unsigned long baudrate) {
 
 	u8 brgconfig, div_lsb, div_msb;
@@ -661,6 +668,7 @@ static int dev_config_baudrate (void __iomem *io_vaddr, unsigned long baudrate) 
 	return 0;
 }
 
+/* Resets synchronization counter */
 static int dev_clear_count_sync (void __iomem *io_vaddr) {
 
 	if (!ioread8(io_vaddr + SYNC_OFFSET)) {
@@ -673,6 +681,7 @@ static int dev_clear_count_sync (void __iomem *io_vaddr) {
 	return -1;
 }
 
+/* Resets shared ram area */
 static int dev_clean_sram (void __iomem *io_vaddr) {
 
 	unsigned int count;
@@ -683,6 +692,7 @@ static int dev_clean_sram (void __iomem *io_vaddr) {
 	return 0;
 }
 
+/* Stops sync operations. Node must be set as Master. */
 static int dev_set_sync_stop (void __iomem *io_vaddr) {
 
 	if (ioread8(io_vaddr + MODE_OFFSET) != 'M')
@@ -707,6 +717,7 @@ static int dev_set_sync_step (void __iomem *io_vaddr) {
 	return 0;
 }
 
+/* Initialization procedure of the character device. Initializes mutexes and registers the device */
 static int __init pru_driver_init(void) {
 
 	printk(KERN_INFO "PRU KVM: initializing module.\n");
@@ -749,6 +760,7 @@ static int __init pru_driver_init(void) {
 	return 0;
 }
 
+/* Exits device and releases all resources. */
 static void __exit pru_driver_exit(void) {
 
 	platform_driver_unregister(&pruss_driver);
@@ -762,6 +774,8 @@ static void __exit pru_driver_exit(void) {
 	printk(KERN_INFO "PRU KVM: module closed.\n");
 }
 
+/* Tries to acquire mutex and initializes the completion variable. Two or more
+ * processes cannot open the file simultaneously */
 static int dev_open(struct inode *inodep, struct file *filep){
 
 	if(!mutex_trylock(&pruchar_mutex)){    /* Try to acquire the mutex */
@@ -776,6 +790,7 @@ static int dev_open(struct inode *inodep, struct file *filep){
 	return 0;
 }
 
+/* Releases resources after a close() call */
 static int dev_release(struct inode *inodep, struct file *filep){
 
 	mutex_unlock(&pruchar_mutex);
@@ -784,7 +799,7 @@ static int dev_release(struct inode *inodep, struct file *filep){
 	return 0;
 }
 
-/* read current memory of PRU485  */
+/* Reads current shared memory state  */
 static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset){
 
 	int error_count = 0;
@@ -799,16 +814,9 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 			unsigned int _uio_size = resource_size(_regs_prussio), count = 0, i;
 			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + PRUSS_SHAREDRAM_BASE;
 
-
-
-			for (count = 0;	count < SRAM_SIZE;	count++) {
-				message[count] = ioread8(p + count);
-				if (count < 100) printk (KERN_INFO "[%d] = 0x%u\n", count, message[count]);
-			}
-
-
-			/*
 			u8 mode = ioread8(p + MODE_OFFSET), status;
+
+			printk(KERN_INFO "mode %c\n", mode);
 
 			switch (mode) {
 			case 'M':
@@ -816,11 +824,21 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 
 				count = 0;
 
+				printk(KERN_INFO "OKKKK\n");
+
 				for (i = 0; i < 4; i++)
 					count += (ioread8(p + SHRAM_READ_OFFSET) << (i*8));
 
-				for (i = 0; i < count; i++)
+				printk(KERN_INFO "65234523423\n");
+
+				/*for (i = 0; i < count; i++)
 					message[i] = ioread8(p + SHRAM_READ_OFFSET + 4 + i);
+					*/
+
+				for (count = 0;	count < SRAM_SIZE;	count++) {
+					message[count] = ioread8(p + count);
+					if (count < 100) printk (KERN_INFO "[%d] = 0x%u\n", count, message[count]);
+				}
 
 				break;
 
@@ -846,7 +864,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 			default:
 				return -EINVAL;
 			}
-			*/
+
 			/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
 			if (copy_to_user(buffer, message, count)){
 				printk(KERN_INFO "PRU KVM: Failed to send %d characters to the user\n", error_count);
@@ -860,6 +878,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 	return -EINVAL;
 }
 
+/* Writes into the shared memory area */
 static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
 
 	if (_pdev) {
@@ -892,7 +911,7 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 
 			iowrite8(MESSAGE_TO_SEND, p + STATUS_OFFSET);
 
-			/* Aguarda sinal de finalizacao do ciclo */
+			/* Waits for an interruption to finish the writing cycle. */
 			wait_for_completion(&intr_completion);
 
 			/* Clears system event */
@@ -916,6 +935,7 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 	return -EINVAL;
 }
 
+/* ioctl() commands handler */
 static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned long arg) {
 
 	if (_pdev) {
@@ -1004,6 +1024,11 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 
 module_init(pru_driver_init);
 module_exit(pru_driver_exit);
+
+MODULE_AUTHOR("Gustavo Ciotto Pinton <gustavo.pinton@lnls.br>");
+#else
+module_platform_driver(pruss_driver);
+#endif
 
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);

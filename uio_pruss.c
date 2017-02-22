@@ -61,9 +61,9 @@ MODULE_PARM_DESC(extram_pool_sz, "external ram pool size to allocate");
 #define MAX_PRUSS_EVT	8
 
 #define PINTC_HIDISR	0x0038
-#define PINTC_HIPIR	0x0900
+#define PINTC_HIPIR		0x0900
 #define HIPIR_NOPEND	0x80000000
-#define PINTC_HIER	0x1500
+#define PINTC_HIER		0x1500
 
 struct uio_pruss_dev {
 	struct uio_info *info;
@@ -78,10 +78,13 @@ struct uio_pruss_dev {
 	struct gen_pool *sram_pool;
 };
 
-
+#ifdef PRUSS_CHAR_DEVICE
 /* Saves platform_device to be used by the character device */
+#define PRU_EVTOUT 	 3
 static struct platform_device* _pdev;
 static int _pdev_c;
+static DECLARE_COMPLETION(intr_completion);
+#endif
 
 static ssize_t store_sync_ddr(struct device *dev, struct device_attribute *attr,  char *buf, size_t count) {
 	struct uio_pruss_dev *gdev;
@@ -123,6 +126,12 @@ static irqreturn_t pruss_handler(int irq, struct uio_info *info)
 	/* Is interrupt enabled and active ? */
 	if (!(val & intr_mask) && (ioread32(intrstat_reg) & HIPIR_NOPEND))
 		return IRQ_NONE;
+
+#ifdef PRUSS_CHAR_DEVICE
+	if (intr_bit == PRU_EVTOUT)
+		complete(&intr_completion);
+#endif
+
 	/* Disable interrupt */
 	iowrite32(intr_bit, intrdis_reg);
 	return IRQ_HANDLED;
@@ -301,6 +310,8 @@ static int pruss_probe(struct platform_device *dev)
 
 	gdev->hostirq_start = platform_get_irq(dev, 0);
 
+	printk (KERN_INFO "gdev->hostirq_start %d", gdev->hostirq_start);
+
 	for (cnt = 0, p = gdev->info; cnt < MAX_PRUSS_EVT; cnt++, p++) {
 		p->mem[0].addr = regs_prussio->start;
 		p->mem[0].size = resource_size(regs_prussio);
@@ -376,40 +387,61 @@ static struct platform_driver pruss_driver = {
 #include <linux/mutex.h>
 #include <asm/uaccess.h>
 
+/* GPIO API used to recover hardware address */
+#include <linux/gpio.h>
+
+/* API support for variable completion */
+#include <linux/completion.h>
+
 #define  DEVICE_NAME "pruss485"
 #define  CLASS_NAME  "pruss485"
 
-#define PRU_NUM 	 1
-#define PRU_EVTOUT_1 1
+#define PRUSS_SHAREDRAM_BASE 0x10000
 
-#define AM33XX_PRUSS_SHAREDRAM_BASE 0x10000
+#define PINTC_HIEISR		0x0034
+#define PRU_INTC_SECR1_REG 	0x280
+#define PRU_ARM_INTERRUPT  	20
 
 #define SZ_12K 	0x3000
 #define STEP 	0x1
-
-#define MODE_OFFSET 				25
-#define MODE_BAUD_OFFSET_BRGCONFIG 	0x2
-#define MODE_BAUD_OFFSET_LSB 		0x3
-#define MODE_BAUD_OFFSET_MSB 		0x4
-#define MODE_BAUD_OFFSET_LENGTH		26
-#define MODE_COUNTER_OFFSET			80
-#define SYNC_STEP_OFFSET			50
 
 #define OLD_MESSAGE					0x55
 #define	NEW_RECEIVED_MESSAGE		0x00
 #define	MESSAGE_TO_SEND				0xff
 
+#define GPIO_P8_31					10
+#define GPIO_P8_32					11
+#define GPIO_P8_33					9
+#define GPIO_P8_34					81
+#define GPIO_P8_35					8
+
 enum ioctl_cmd {
-	PRUSS_CLEAN,
+	PRUSS_CLEAN = 10,
 	PRUSS_MODE,
-	PRUSS_BAUDRATE,
 	PRUSS_SYNC_STEP,
 	PRUSS_SET_COUNTER,
+	PRUSS_GET_HW_ADDRESS,
+	PRUSS_BAUDRATE,
+	PRUSS_TIMEOUT,
+};
+
+enum offset {
+	STATUS_OFFSET = 1,
+	BAUD_BRGCONFIG_OFFSET,
+	BAUD_LSB_OFFSET,
+	BAUD_MSB_OFFSET,
+	TIMEOUT_OFFSET = 6,
+	HW_ADDR_OFFSET = 24,
+	MODE_OFFSET,
+	BAUD_LENGTH_OFFSET,
+	SYNC_STEP_OFFSET = 50,
+	MODE_COUNTER_OFFSET = 80,
+	SHRAM_WRITE_OFFSET = 0x64,
+	SHRAM_READ_OFFSET = 0x1800,
 };
 
 static int majorNumber;
 static u8 message[SZ_12K] = {0};
-static short size_of_message;
 
 /* mutex protecting read and writing order */
 static DEFINE_MUTEX(pruchar_mutex);
@@ -435,13 +467,58 @@ static struct file_operations fops = {
 
 /* Character device initialization and exit functions   */
 
+static int __init_gpio (unsigned int id, const char *label) {
+
+	int err = 0;
+
+	err |= gpio_request(id, label);
+	err |= gpio_direction_input(id);
+
+	return err;
+}
+
+static u8 __dev_get_hw_addr(void) {
+
+	u8 addr = 0;
+
+	__init_gpio(GPIO_P8_31, "gpio10");
+	__init_gpio(GPIO_P8_32, "gpio11");
+	__init_gpio(GPIO_P8_33, "gpio9");
+	__init_gpio(GPIO_P8_34, "gpio81");
+	__init_gpio(GPIO_P8_35, "gpio8");
+
+	if (gpio_get_value(GPIO_P8_31))
+		addr |= 0b0001;
+
+	if (gpio_get_value(GPIO_P8_32))
+		addr |= 0b0010;
+
+	if (gpio_get_value(GPIO_P8_33))
+		addr |= 0b0100;
+
+	if (gpio_get_value(GPIO_P8_34))
+		addr |= 0b1000;
+
+	if (gpio_get_value(GPIO_P8_35))
+		addr |= 0b10000;
+
+	gpio_free(GPIO_P8_31);
+	gpio_free(GPIO_P8_32);
+	gpio_free(GPIO_P8_33);
+	gpio_free(GPIO_P8_34);
+	gpio_free(GPIO_P8_35);
+
+	return addr;
+}
+
 static int __dev_set_sync_counter (void __iomem *_prussio_vaddr, unsigned long sync_counter) {
 
+	iowrite16(sync_counter, _prussio_vaddr + MODE_COUNTER_OFFSET);
+	/*
 	iowrite8(sync_counter & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET);
 	iowrite8((sync_counter >> 8) & 0xff, _prussio_vaddr + MODE_COUNTER_OFFSET + 1);
-
+	*/
 	return 0;
-
 }
 
 static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long baudrate) {
@@ -480,6 +557,9 @@ static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long ba
 		break;
 
 	case 14400:
+
+		printk (KERN_INFO "14400 entrou");
+
 		brgconfig = 0x07;
 		div_lsb = 0x04;
 		div_msb = 0x01;
@@ -518,13 +598,13 @@ static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long ba
 		return -EINVAL;
 	}
 
-	iowrite8(brgconfig, _prussio_vaddr + MODE_BAUD_OFFSET_BRGCONFIG);
-	iowrite8(div_lsb, _prussio_vaddr + MODE_BAUD_OFFSET_LSB);
-	iowrite8(div_msb, _prussio_vaddr + MODE_BAUD_OFFSET_MSB);
+	iowrite8(brgconfig, _prussio_vaddr + BAUD_BRGCONFIG_OFFSET);
+	iowrite8(div_lsb, _prussio_vaddr + BAUD_LSB_OFFSET);
+	iowrite8(div_msb, _prussio_vaddr + BAUD_MSB_OFFSET);
 
-	iowrite8(one_byte_length_ns & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH);
-	iowrite8((one_byte_length_ns >> 8) & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH + 1);
-	iowrite8((one_byte_length_ns >> 16) & 0xff, _prussio_vaddr + MODE_BAUD_OFFSET_LENGTH + 2);
+	iowrite8(one_byte_length_ns & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET);
+	iowrite8((one_byte_length_ns >> 8) & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET + 1);
+	iowrite8((one_byte_length_ns >> 16) & 0xff, _prussio_vaddr + BAUD_LENGTH_OFFSET + 2);
 
 	return 0;
 }
@@ -532,6 +612,8 @@ static int __dev_config_baudrate (void __iomem *_prussio_vaddr, unsigned long ba
 static int __dev_clean_sram (void __iomem *_prussio_vaddr) {
 
 	unsigned int count;
+
+	printk(KERN_INFO "chamou\n");
 
 	for (count = 0; count < 100; count++)
 		iowrite8(0, _prussio_vaddr + count);
@@ -627,6 +709,8 @@ static int dev_open(struct inode *inodep, struct file *filep){
 		return -EBUSY;
 	}
 
+	init_completion(&intr_completion);
+
 	printk(KERN_INFO "PRU KVM: device has been opened.\n");
 	return 0;
 }
@@ -651,42 +735,68 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 		if (gdev) {
 
 			struct resource *_regs_prussio = platform_get_resource(_pdev, IORESOURCE_MEM, 0);
-			unsigned int _uio_size = resource_size(_regs_prussio), count;
-			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + AM33XX_PRUSS_SHAREDRAM_BASE;
+			unsigned int _uio_size = resource_size(_regs_prussio), count = 0, i;
+			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + PRUSS_SHAREDRAM_BASE;
 
-			for (count = 0;	count < SZ_12K;	count++)
+
+			for (count = 0;	count < SZ_12K;	count++) {
 				message[count] = ioread8(p + count);
-		}
-		else {
-			printk (KERN_INFO "gdev NULL \n");
-			return -EFAULT;
-		}
+				if (count < 100) printk (KERN_INFO "[%d] = 0x%u\n", count, message[count]);
+			}
 
-		/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
-		error_count = copy_to_user(buffer, message, SZ_12K);
-		if (!error_count) {
-			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", strlen(message));
-			return (size_of_message=0);
-		}
-		else {
-			printk(KERN_INFO "PRU KVM: Failed to send %d characters to the user\n", error_count);
-			return -EFAULT;
+			/*
+			u8 mode = ioread8(p + MODE_OFFSET), status;
+
+			switch (mode) {
+			case 'M':
+				while (ioread8(p + STATUS_OFFSET)); //REPLACE?
+
+				count = 0;
+
+				for (i = 0; i < 4; i++)
+					count += (ioread8(p + SHRAM_READ_OFFSET) << (i*8));
+
+				for (i = 0; i < count; i++)
+					message[i] = ioread8(p + SHRAM_READ_OFFSET + 4 + i);
+
+				break;
+
+			case 'S':
+				status = ioread8(p + STATUS_OFFSET);
+				if (status  == NEW_RECEIVED_MESSAGE){
+
+					count = 0;
+
+					for (i = 0; i < 4; i++)
+						count += (ioread8(p + SHRAM_READ_OFFSET) << (i*8));
+
+					for (i = 0; i < count; i++)
+						message[i] = ioread8(p + SHRAM_READ_OFFSET + 4 + i);
+
+				}
+				else if (status == OLD_MESSAGE)
+					return -EINVAL;
+
+				break;
+
+			default:
+				return -EINVAL;
+			}*/
+
+			/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
+			if (copy_to_user(buffer, message, count)){
+				printk(KERN_INFO "PRU KVM: Failed to send %d characters to the user\n", error_count);
+				return -EFAULT;
+			}
+
+			printk(KERN_INFO "PRU KVM: Sent %d characters to the user\n", count);
+			return 0;
 		}
 	}
-
 	return -EINVAL;
 }
 
-
 static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
-
-	sprintf(message, "%s(%zu letters)", buffer, len);
-	size_of_message = strlen(message);
-	printk(KERN_INFO "EBBChar: Received %zu characters from the user\n", len);
-	return len;
-}
-
-static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned long arg) {
 
 	if (_pdev) {
 
@@ -695,8 +805,67 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 		if (gdev) {
 
 			struct resource *_regs_prussio = platform_get_resource(_pdev, IORESOURCE_MEM, 0);
+			unsigned int _uio_size = resource_size(_regs_prussio), count;
+			void __iomem 	*base = ioremap(_regs_prussio->start, _uio_size),
+					*p =  base + PRUSS_SHAREDRAM_BASE,
+					*intrc = base + gdev->pintc_base;
+
+			printk(KERN_INFO "EBBChar: Received %zu characters from the user\n", len);
+
+			if (ioread8(p + MODE_OFFSET) == 'M') {
+				//iowrite32(,p + TIMEOUT_OFFSET); TO-DO
+			}
+
+			/*
+			iowrite8(len & 0xff, p + SHRAM_WRITE_OFFSET);
+			iowrite8((len >> 8) & 0xff, p + SHRAM_WRITE_OFFSET + 1);
+			iowrite8((len >> 16) & 0xff, p + SHRAM_WRITE_OFFSET + 2);
+			iowrite8((len >> 24) & 0xff, p + SHRAM_WRITE_OFFSET + 3);
+			*/
+			iowrite32(len, p + SHRAM_WRITE_OFFSET);
+
+			for (count = 0; count < len; count++)
+				iowrite8(buffer[count], p + SHRAM_WRITE_OFFSET + 4 + count);
+
+			iowrite8(MESSAGE_TO_SEND, p + STATUS_OFFSET);
+
+			/* Aguarda sinal de finalizacao do ciclo */
+			wait_for_completion(&intr_completion);
+
+			/* Clears system event */
+			iowrite32(1 << PRU_ARM_INTERRUPT, intrc + PRU_INTC_SECR1_REG);
+
+			/* Re-enables interruption */
+			iowrite32(1 << PRU_EVTOUT, intrc + PINTC_HIEISR);
+
+			if (ioread8(p + MODE_OFFSET) == 'M')
+				while (ioread8(p + STATUS_OFFSET) != OLD_MESSAGE); /* REPLACE? */
+
+			return len;
+
+		}
+		else {
+			printk (KERN_INFO "gdev NULL \n");
+			return -EFAULT;
+		}
+
+	}
+
+	return -EINVAL;
+}
+
+static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned long arg) {
+
+	if (_pdev) {
+
+		u8 hw_addr;
+		struct uio_pruss_dev *gdev = platform_get_drvdata(_pdev);
+
+		if (gdev) {
+
+			struct resource *_regs_prussio = platform_get_resource(_pdev, IORESOURCE_MEM, 0);
 			unsigned int _uio_size = resource_size(_regs_prussio);
-			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + AM33XX_PRUSS_SHAREDRAM_BASE;
+			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + PRUSS_SHAREDRAM_BASE;
 
 			switch (cmd) {
 
@@ -708,11 +877,10 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 					__dev_set_sync_stop(p);
 
 					if (arg == 'S')
-						iowrite8(OLD_MESSAGE, p + 1);
+						iowrite8(OLD_MESSAGE, p + STATUS_OFFSET);
 
 					return 0;
 				}
-
 				return -EINVAL;
 
 			case PRUSS_BAUDRATE:
@@ -731,13 +899,30 @@ static long dev_unlocked_ioctl (struct file *filep, unsigned int cmd, unsigned l
 
 				return __dev_set_sync_counter(p, arg);
 
+			case PRUSS_GET_HW_ADDRESS:
+
+				hw_addr = __dev_get_hw_addr();
+				iowrite8(hw_addr, p + HW_ADDR_OFFSET);
+
+				return 0;
+
+			case PRUSS_TIMEOUT:
+
+				arg = arg * 66600;
+
+				iowrite8(arg & 0xff, p + TIMEOUT_OFFSET);
+				iowrite8((arg > 8) & 0xff, p + TIMEOUT_OFFSET + 1);
+				iowrite8((arg > 16) & 0xff, p + TIMEOUT_OFFSET + 2);
+				iowrite8((arg > 24) & 0xff, p + TIMEOUT_OFFSET + 3);
+
+				return 0;
+
 			default:
 
 				return -EINVAL;
 			}
 		}
-		else
-			return -EFAULT;
+		else return -EFAULT;
 	}
 
 	return -EINVAL;

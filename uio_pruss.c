@@ -800,12 +800,14 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 			void __iomem *p = ioremap(_regs_prussio->start, _uio_size) + PRUSS_SHAREDRAM_BASE;
 
 
-			/*
+
 			for (count = 0;	count < SRAM_SIZE;	count++) {
 				message[count] = ioread8(p + count);
 				if (count < 100) printk (KERN_INFO "[%d] = 0x%u\n", count, message[count]);
-			}*/
+			}
 
+
+			/*
 			u8 mode = ioread8(p + MODE_OFFSET), status;
 
 			switch (mode) {
@@ -844,7 +846,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
 			default:
 				return -EINVAL;
 			}
-
+			*/
 			/* copy_to_user has the format ( * to, *from, size) and returns 0 on success */
 			if (copy_to_user(buffer, message, count)){
 				printk(KERN_INFO "PRU KVM: Failed to send %d characters to the user\n", error_count);

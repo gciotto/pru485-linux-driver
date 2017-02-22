@@ -14,11 +14,15 @@
 enum ioctl_cmd {
 	PRUSS_CLEAN = 10,
 	PRUSS_MODE,
-	PRUSS_SYNC_STEP,
-	PRUSS_SET_COUNTER,
+	PRUSS_SET_SYNC_STEP,
+	PRUSS_SET_PULSE_COUNT_SYNC,
 	PRUSS_GET_HW_ADDRESS,
 	PRUSS_BAUDRATE,
 	PRUSS_TIMEOUT,
+	PRUSS_GET_PULSE_COUNT_SYNC,
+	PRUSS_CLEAR_PULSE_COUNT_SYNC,
+	PRUSS_START_SYNC,
+	PRUSS_STOP_SYNC,
 };
 
 int main () {
@@ -30,11 +34,13 @@ int main () {
 
 	ioctl(fd, PRUSS_CLEAN);
 	ioctl(fd, PRUSS_MODE, 'M');
-	ioctl(fd, PRUSS_SYNC_STEP);
-	ioctl(fd, PRUSS_SET_COUNTER, 0);
+	ioctl(fd, PRUSS_SET_SYNC_STEP);
+	ioctl(fd, PRUSS_SET_PULSE_COUNT_SYNC, 0);
 	ioctl(fd, PRUSS_BAUDRATE, 12);
 	ioctl(fd, PRUSS_GET_HW_ADDRESS);
 	ioctl(fd, PRUSS_TIMEOUT, 8);
+	ioctl(fd, PRUSS_SET_PULSE_COUNT_SYNC, 0x0102);
+	printf("PRUSS_GET_PULSE_COUNT_SYNC = 0x%02x\n", ioctl(fd, PRUSS_GET_PULSE_COUNT_SYNC));
 
 	printf("Reading from the device...\n");
 	ret = read(fd, receive, SZ_12K);
@@ -44,9 +50,9 @@ int main () {
 	}
 
 	for (i = 0; i < 100; i++) {
-		printf("[%d] = 0x%x ", i, receive[i]);
+		printf("[%2d] = 0x%02x ", i, receive[i]);
 
-		if (!((i+1)%10))
+		if (!((i+1)%8))
 			printf("\n");
 	}
 
